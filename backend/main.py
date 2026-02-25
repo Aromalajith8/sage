@@ -47,9 +47,9 @@ db = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ── Lifespan ─────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler = start_scheduler()
+    # scheduler = start_scheduler()
     yield
-    scheduler.shutdown()
+    # scheduler.shutdown()
 
 app = FastAPI(title="Sage", lifespan=lifespan)
 
