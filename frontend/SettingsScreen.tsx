@@ -14,11 +14,15 @@ interface Props { onBack: () => void; onLogout: () => void; }
 
 export default function SettingsScreen({ onBack, onLogout }: Props) {
   const { user, setUser, typingEnabled, setTypingEnabled } = useStore();
-  const [showQR, setShowQR]               = useState(false);
-  const [fingerprint, setFingerprint]     = useState('');
-  const [newUsername, setNewUsername]     = useState('');
-  const [changingName, setChangingName]   = useState(false);
-  const [loading, setLoading]             = useState(false);
+  const [showQR, setShowQR]             = useState(false);
+  const [fingerprint, setFingerprint]   = useState('');
+  const [newUsername, setNewUsername]   = useState('');
+  const [changingName, setChangingName] = useState(false);
+  const [loading, setLoading]           = useState(false);
+  // FIX #5: Bio state
+  const [editingBio, setEditingBio]     = useState(false);
+  const [bioText, setBioText]           = useState(user?.bio || '');
+  const [savingBio, setSavingBio]       = useState(false);
   const sageColor = getSageColor();
 
   const canChangeUsername = !user?.username_changed_at;
@@ -57,6 +61,19 @@ export default function SettingsScreen({ onBack, onLogout }: Props) {
     );
   };
 
+  // FIX #5: Save bio to backend
+  const handleSaveBio = async () => {
+    const trimmed = bioText.trim().slice(0, 160);
+    setSavingBio(true);
+    try {
+      const res = await api.updateBio(trimmed);
+      setUser({ ...user!, bio: trimmed });
+      setEditingBio(false);
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Could not save bio');
+    } finally { setSavingBio(false); }
+  };
+
   const handleLogout = () => {
     Alert.alert('Logout', 'You will need to verify your email again to log back in.', [
       { text: 'Cancel', style: 'cancel' },
@@ -82,6 +99,44 @@ export default function SettingsScreen({ onBack, onLogout }: Props) {
           <Row label="username"  value={user?.username || ''} />
           <Row label="sage id"   value={user?.hash_id || ''} mono small />
           <Row label="timezone"  value={user?.timezone || 'UTC'} />
+        </Section>
+
+        {/* FIX #5: Bio section */}
+        <Section label="BIO">
+          {editingBio ? (
+            <>
+              <TextInput
+                style={s.bioInput}
+                value={bioText}
+                onChangeText={t => setBioText(t.slice(0, 160))}
+                placeholder="tell people a bit about you..."
+                placeholderTextColor={Colors.textMuted}
+                multiline
+                maxLength={160}
+                autoFocus
+              />
+              <Text style={s.bioCount}>{bioText.length}/160</Text>
+              <TouchableOpacity style={s.actionBtn} onPress={handleSaveBio} disabled={savingBio}>
+                <Text style={[s.actionText, { color: sageColor }]}>
+                  {savingBio ? 'saving...' : '[save bio]'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { setEditingBio(false); setBioText(user?.bio || ''); }}>
+                <Text style={s.cancelText}>[cancel]</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              {user?.bio ? (
+                <Text style={s.bioDisplay}>{user.bio}</Text>
+              ) : (
+                <Text style={s.hint}>no bio yet — visible to everyone</Text>
+              )}
+              <TouchableOpacity style={s.actionBtn} onPress={() => setEditingBio(true)}>
+                <Text style={s.actionText}>{user?.bio ? '[edit bio]' : '[add bio]'}</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </Section>
 
         {/* QR Code */}
@@ -140,7 +195,7 @@ export default function SettingsScreen({ onBack, onLogout }: Props) {
           <Text style={s.hint}>let others see when you're typing</Text>
         </Section>
 
-        {/* Midnight reset info */}
+        {/* Data Policy */}
         <Section label="DATA POLICY">
           <Text style={s.policyText}>
             {'> all messages are deleted at midnight in your local timezone.\n> no message history is stored after reset.\n> the server cannot decrypt your messages.\n> your private key never leaves this device.'}
@@ -222,6 +277,14 @@ const s = StyleSheet.create({
   input:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm,
              borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm,
              backgroundColor: Colors.inputBg, marginBottom: Spacing.sm },
+  bioInput:  { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm,
+               borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm,
+               backgroundColor: Colors.inputBg, marginBottom: Spacing.xs,
+               minHeight: 80, textAlignVertical: 'top' },
+  bioCount:  { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
+               textAlign: 'right', marginBottom: Spacing.sm },
+  bioDisplay:{ fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm,
+               lineHeight: 20, marginBottom: Spacing.sm },
   actionBtn:   { paddingVertical: Spacing.sm },
   actionText:  { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm },
   cancelText:  { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginTop: Spacing.xs },
@@ -233,16 +296,16 @@ const s = StyleSheet.create({
   logoutBtn:   { paddingVertical: Spacing.md },
   logoutText:  { fontFamily: Font.mono, color: '#ff4444', fontSize: Font.size.sm },
 
-  qrOverlay:   { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' },
-  qrBox:       { backgroundColor: Colors.bg, borderWidth: 1, borderColor: Colors.border,
-                 padding: Spacing.xl, alignItems: 'center', minWidth: 280 },
-  qrTitle:     { fontFamily: Font.mono, fontSize: Font.size.lg, fontWeight: 'bold',
-                 letterSpacing: 4, marginBottom: Spacing.lg },
-  qrWrap:      { padding: Spacing.md, backgroundColor: '#000', borderWidth: 1, borderColor: Colors.border },
-  qrHashId:    { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.xs,
-                 marginTop: Spacing.md, letterSpacing: 2 },
-  qrUsername:  { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm, marginTop: 4 },
+  qrOverlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' },
+  qrBox:        { backgroundColor: Colors.bg, borderWidth: 1, borderColor: Colors.border,
+                  padding: Spacing.xl, alignItems: 'center', minWidth: 280 },
+  qrTitle:      { fontFamily: Font.mono, fontSize: Font.size.lg, fontWeight: 'bold',
+                  letterSpacing: 4, marginBottom: Spacing.lg },
+  qrWrap:       { padding: Spacing.md, backgroundColor: '#000', borderWidth: 1, borderColor: Colors.border },
+  qrHashId:     { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.xs,
+                  marginTop: Spacing.md, letterSpacing: 2 },
+  qrUsername:   { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm, marginTop: 4 },
   qrFingerprint:{ fontFamily: Font.mono, color: Colors.textMuted, fontSize: 9,
                   marginTop: Spacing.sm, textAlign: 'center' },
-  qrDismiss:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginTop: Spacing.lg },
+  qrDismiss:    { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginTop: Spacing.lg },
 });
