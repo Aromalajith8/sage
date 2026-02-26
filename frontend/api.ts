@@ -1,7 +1,8 @@
 // src/utils/api.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'https://your-render-app.onrender.com';
+// UPDATE: Using your specific Render URL
+const BASE_URL = 'https://sage-10yk.onrender.com';
 const WS_URL   = BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
 // ── Token management ─────────────────────────────────────────
@@ -25,12 +26,21 @@ async function apiFetch(path: string, options: RequestInit = {}, auth = true) {
     if (token) headers['Authorization'] = `Bearer ${token}`;
   }
   const res = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options.headers as any) } });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Request failed');
-  return data;
+  
+  // Robust error handling for non-JSON responses
+  const contentType = res.headers.get("content-type");
+  if (contentType && contentType.indexOf("application/json") !== -1) {
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.message || 'Request failed');
+    return data;
+  } else {
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || 'Request failed');
+    return text;
+  }
 }
 
-// ── Auth ─────────────────────────────────────────────────────
+// ── Auth & Endpoints ──────────────────────────────────────────
 
 export const api = {
   sendOtp:        (email: string) => apiFetch('/auth/send-otp', { method: 'POST', body: JSON.stringify({ email }) }, false),
@@ -38,20 +48,20 @@ export const api = {
   registerNew:    (email: string, username: string, pubkey_pem: string) =>
                     apiFetch('/auth/register-new', { method: 'POST', body: JSON.stringify({ email, username, pubkey_pem }) }, false),
   getMe:          () => apiFetch('/auth/me'),
-  changeUsername: (new_username: string) => apiFetch('/auth/change-username', { method: 'POST', body: JSON.stringify({ new_username }) }),
-  updatePubkey:   (pubkey_pem: string) => apiFetch('/auth/update-pubkey', { method: 'POST', body: JSON.stringify({ pubkey_pem }) }),
+  changeUsername: (new_username: string) => apiFetch('/auth/change-username', { method: 'POST', body: JSON.stringify({ username: new_username }) }),
+  updatePubkey:   (pubkey_pem: string) => apiFetch('/auth/update-pubkey', { method: 'POST', body: JSON.stringify({ public_key: pubkey_pem }) }),
   updateBio:      (bio: string) => apiFetch('/auth/update-bio', { method: 'POST', body: JSON.stringify({ bio }) }),
 
-  searchUsers:    (q: string) => apiFetch(`/users/search?q=${encodeURIComponent(q)}`),
-  getUserByHash:  (hash_id: string) => apiFetch(`/users/by-hash/${hash_id}`),
+  searchUsers:    (q: string) => apiFetch(`/search?q=${encodeURIComponent(q)}`),
+  getUserByHash:  (hash_id: string) => apiFetch(`/user-by-hash/${hash_id}`),
   getPubkey:      (user_id: string) => apiFetch(`/users/${user_id}/pubkey`),
 
   getContacts:    () => apiFetch('/contacts'),
   getMessages:    (user_id: string) => apiFetch(`/messages/${user_id}`),
 
   createRoom:     (name: string, duration_hours: number) =>
-                    apiFetch('/rooms', { method: 'POST', body: JSON.stringify({ name, duration_hours }) }),
-  joinRoom:       (room_code: string) => apiFetch('/rooms/join', { method: 'POST', body: JSON.stringify({ room_code }) }),
+                    apiFetch('/rooms/create', { method: 'POST', body: JSON.stringify({ name, duration_hours }) }),
+  joinRoom:       (code: string) => apiFetch('/rooms/join', { method: 'POST', body: JSON.stringify({ code }) }),
   getRoomMessages:(room_id: string) => apiFetch(`/rooms/${room_id}/messages`),
   exportRoom:     (room_id: string) => apiFetch(`/rooms/${room_id}/export`),
 };
@@ -85,7 +95,6 @@ class SageWebSocket {
     };
 
     this.ws.onclose = () => {
-      // Auto-reconnect after 3 seconds
       this.reconnectTimer = setTimeout(() => this._connect(), 3000);
     };
 
