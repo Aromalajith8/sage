@@ -489,9 +489,38 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
                 }
                 saved = db.table("messages").insert(row).execute().data[0]
 
-                db.table("contacts").upsert({"user_id": user_id, "contact_id": to_id}).execute()
-                db.table("contacts").upsert({"user_id": to_id, "contact_id": user_id}).execute()
+                                expires_at = calculate_message_expiry(user.get("timezone", "UTC"))
 
+                row = {
+                    "sender_id":      user_id,
+                    "receiver_id":    to_id,
+                    "encrypted_data": encrypted,
+                    "status":         "sent",
+                    "burn_mode":      False,
+                    "expires_at":     expires_at,
+                }
+                saved = db.table("messages").insert(row).execute().data[0]
+                try:
+                    db.table("contacts").upsert({"user_id": user_id, "contact_id": to_id}, on_conflict="user_id,contact_id").execute()
+                except:
+                    pass
+                try:
+                    db.table("contacts").upsert({"user_id": to_id, "contact_id": user_id}, on_conflict="user_id,contact_id").execute()
+                except:
+                    pass
+                log.info(f"[relay] DM {user_id}→{to_id} ({len(encrypted)} chars)")
+                await ws_manager.send(to_id, {
+                    "type":       "dm",
+                    "id":         saved["id"],
+                    "from":       user_id,
+                    "from_name":  user["username"],
+                    "data":       encrypted,
+                    "created_at": saved["created_at"],
+                })
+
+                is_online = to_id in ws_manager.active
+                await ws_manager.send(user_id, {
+                    "type":   "status",
                 log.info(f"[relay] DM {user_id}→{to_id} ({len(encrypted)} chars)")
                 await ws_manager.send(to_id, {
                     "type":       "dm",
