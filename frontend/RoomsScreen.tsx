@@ -1,16 +1,15 @@
 // src/screens/RoomsScreen.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, TextInput,
-  Alert, ScrollView, FlatList, KeyboardAvoidingView, Platform, BackHandler
+  Alert, ScrollView, KeyboardAvoidingView, Platform, FlatList
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Colors, Font, Spacing, getSageColor } from '../utils/theme';
-import { api, wsClient } from '../utils/api';
+import { api } from '../utils/api';
 import { useStore } from '../store';
-import { encryptMessage, decryptMessage } from '../utils/crypto';
 
 interface Room {
   id: string;
@@ -22,10 +21,8 @@ interface Room {
 
 interface RoomMessage {
   id: string;
-  sender_id: string;
-  from_name: string;
   text: string;
-  created_at: string;
+  sender_id: string;
 }
 
 interface Props { onBack: () => void; }
@@ -41,66 +38,16 @@ export default function RoomsScreen({ onBack }: Props) {
   const [loading, setLoading]   = useState(false);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
   const [myRooms, setMyRooms]   = useState<Room[]>([]);
-  const [messages, setMessages] = useState<RoomMessage[]>([]);
-  const [inputText, setInputText] = useState('');
-  const flatListRef = useRef<FlatList>(null);
+  
+  // Chat States
+  const [chatInput, setChatInput] = useState('');
+  const [roomMessages, setRoomMessages] = useState<RoomMessage[]>([]);
+  
   const sageColor = getSageColor();
 
   useEffect(() => {
     loadMyRooms();
   }, []);
-
-  // Handle Hardware Back Button
-  useEffect(() => {
-    const backAction = () => {
-      if (mode !== 'menu') {
-        setMode('menu');
-        setActiveRoom(null);
-        return true; // Prevent default behavior (closing app)
-      }
-      onBack(); // If on menu, use the navigator's back
-      return true;
-    };
-
-    const backHandler = BackHandler.addEventListener(
-      'hardwareBackPress',
-      backAction
-    );
-
-    return () => backHandler.remove();
-  }, [mode, onBack]);
-
-
-  // Listen for real-time room messages
-  useEffect(() => {
-    if (!activeRoom) return;
-
-    const handleWsMessage = async (msg: any) => {
-      if (msg.type === 'room_msg' && msg.room_id === activeRoom.id) {
-        try {
-          const decrypted = await decryptMessage(msg.data);
-          const newMsg: RoomMessage = {
-            id: msg.id,
-            sender_id: msg.from,
-            from_name: msg.from_name,
-            text: decrypted,
-            created_at: msg.created_at,
-          };
-          setMessages(prev => [...prev, newMsg]);
-          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-        } catch (e) {
-          console.log('Failed to decrypt incoming room msg', e);
-        }
-      }
-    };
-
-    wsClient.onMessage(handleWsMessage);
-    loadRoomHistory(activeRoom.id);
-
-    return () => {
-      wsClient.offMessage(handleWsMessage);
-    };
-  }, [activeRoom]);
 
   const loadMyRooms = async () => {
     try {
@@ -124,29 +71,6 @@ export default function RoomsScreen({ onBack }: Props) {
     } catch {}
   };
 
-  const loadRoomHistory = async (roomId: string) => {
-    try {
-      const res = await api.getRoomMessages(roomId);
-      const loaded: RoomMessage[] = [];
-      for (const m of res.messages) {
-        try {
-          const text = await decryptMessage(m.encrypted_data);
-          loaded.push({
-            id: m.id,
-            sender_id: m.sender_id,
-            from_name: m.users?.username || 'unknown',
-            text,
-            created_at: m.created_at,
-          });
-        } catch {}
-      }
-      setMessages(loaded);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 100);
-    } catch (e: any) {
-      Alert.alert('Error', 'Could not load room history');
-    }
-  };
-
   const handleCreate = async () => {
     if (!roomName.trim()) return Alert.alert('Error', 'Enter a room name');
     setLoading(true);
@@ -154,7 +78,7 @@ export default function RoomsScreen({ onBack }: Props) {
       const res = await api.createRoom(roomName.trim(), duration);
       await saveRoom(res.room);
       setActiveRoom(res.room);
-      setMessages([]);
+      setRoomMessages([]); // Clear chat on new room
       setMode('room');
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -171,45 +95,11 @@ export default function RoomsScreen({ onBack }: Props) {
       const res = await api.joinRoom(code);
       await saveRoom(res.room);
       setActiveRoom(res.room);
-      setMessages([]);
+      setRoomMessages([]); // Clear chat on new join
       setMode('room');
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setLoading(false); }
-  };
-
-  const handleSend = async () => {
-    if (!inputText.trim() || !activeRoom) return;
-    const text = inputText.trim();
-    setInputText('');
-    
-    // Optimistic UI update
-    const tempId = `temp-${Date.now()}`;
-    const myMsg: RoomMessage = {
-      id: tempId,
-      sender_id: user?.id || '',
-      from_name: user?.username || 'me',
-      text,
-      created_at: new Date().toISOString(),
-    };
-    setMessages(prev => [...prev, myMsg]);
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-
-    try {
-      // In a real app, you need the public keys of all room members to encrypt properly.
-      // For this prototype, we'll use a placeholder or encrypt it simply if the backend handles room distribution differently.
-      // Assuming api.ts has a generic encrypt for rooms or you are sending raw for now (NOT SECURE for production)
-      // We will encrypt using the sender's key just so it's not plaintext on the wire, but this needs a proper group key exchange for production.
-      const encrypted = await encryptMessage(text, ""); // Requires proper pub key logic for groups
-      
-      wsClient.send({
-        type: 'room_msg',
-        room_id: activeRoom.id,
-        data: encrypted, // Send encrypted data
-      });
-    } catch (e) {
-      console.log('Failed to send room msg', e);
-    }
   };
 
   const handleExport = async () => {
@@ -227,6 +117,23 @@ export default function RoomsScreen({ onBack }: Props) {
     }
   };
 
+  const handleSendRoomMessage = () => {
+    if (!chatInput.trim()) return;
+    
+    // Add locally for now to make the UI responsive
+    const newMsg = {
+      id: Date.now().toString(),
+      text: chatInput.trim(),
+      sender_id: user?.id || 'unknown'
+    };
+    
+    setRoomMessages(prev => [...prev, newMsg]);
+    setChatInput('');
+    
+    // Note: If you want these messages to sync to other users, 
+    // you will need to add a websocket emit here in the future!
+  };
+
   const formatExpiry = (iso: string) => {
     const d = new Date(iso);
     const diff = d.getTime() - Date.now();
@@ -236,122 +143,7 @@ export default function RoomsScreen({ onBack }: Props) {
     return `${h}h ${m}m remaining`;
   };
 
-  const renderMessage = ({ item }: { item: RoomMessage }) => {
-    const isMe = item.sender_id === user?.id;
-    return (
-      <View style={[s.msgContainer, isMe ? s.msgContainerMe : s.msgContainerThem]}>
-        {!isMe && <Text style={s.msgSenderName}>{item.from_name}</Text>}
-        <View style={[s.msgBubble, isMe ? [s.msgBubbleMe, { borderColor: sageColor }] : s.msgBubbleThem]}>
-          <Text style={[s.msgText, isMe ? { color: sageColor } : null]}>{item.text}</Text>
-        </View>
-      </View>
-    );
-  };
-
+  // ── Main menu ────────────────────────────────────────────────
   if (mode === 'menu') return (
     <ScrollView style={s.root} contentContainerStyle={{ flexGrow: 1 }}>
-      <View style={s.header}>
-        <TouchableOpacity onPress={onBack}><Text style={s.back}>{'< back'}</Text></TouchableOpacity>
-        <Text style={[s.title, { color: sageColor }]}>ROOMS</Text>
-      </View>
-
-      <View style={s.menu}>
-        <Text style={s.menuHint}>{'> self-destructing group chats'}</Text>
-        <TouchableOpacity style={s.menuBtn} onPress={() => setMode('create')}>
-          <Text style={s.menuBtnText}>[create room]</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={s.menuBtn} onPress={() => setMode('join')}>
-          <Text style={s.menuBtnText}>[join with code]</Text>
-        </TouchableOpacity>
-      </View>
-
-      {myRooms.length > 0 && (
-        <View style={s.myRoomsSection}>
-          <Text style={s.myRoomsLabel}>MY ROOMS</Text>
-          {myRooms.map(room => (
-            <TouchableOpacity
-              key={room.id}
-              style={s.roomItem}
-              onPress={() => { setActiveRoom(room); setMode('room'); }}
-            >
-              <View style={s.roomItemLeft}>
-                <Text style={s.roomItemName}>{room.name}</Text>
-                <Text style={s.roomItemCode}>{room.room_code}</Text>
-              </View>
-              <Text style={s.roomItemExpiry}>{formatExpiry(room.expires_at)}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-    </ScrollView>
-  );
-
-  if (mode === 'create') return (
-    <View style={s.root}>
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => setMode('menu')}><Text style={s.back}>{'< back'}</Text></TouchableOpacity>
-        <Text style={[s.title, { color: sageColor }]}>CREATE ROOM</Text>
-      </View>
-      <View style={s.form}>
-        <Text style={s.label}>room name</Text>
-        <TextInput
-          style={s.input}
-          value={roomName}
-          onChangeText={setRoomName}
-          placeholder="e.g. project-x"
-          placeholderTextColor={Colors.textMuted}
-          autoFocus
-          autoCapitalize="none"
-        />
-        <Text style={s.label}>self-destruct after</Text>
-        <View style={s.durationRow}>
-          {([1, 6, 12, 24] as const).map(d => (
-            <TouchableOpacity
-              key={d}
-              style={[s.durationBtn, duration === d && { borderColor: sageColor }]}
-              onPress={() => setDuration(d)}
-            >
-              <Text style={[s.durationText, duration === d && { color: sageColor }]}>{d}h</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-        <TouchableOpacity style={[s.submitBtn, { borderColor: sageColor }]} onPress={handleCreate} disabled={loading}>
-          <Text style={[s.submitText, { color: sageColor }]}>{loading ? 'creating...' : '[create]'}</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-
-  if (mode === 'join') return (
-    <View style={s.root}>
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => setMode('menu')}><Text style={s.back}>{'< back'}</Text></TouchableOpacity>
-        <Text style={[s.title, { color: sageColor }]}>JOIN ROOM</Text>
-      </View>
-      <View style={s.form}>
-        <Text style={s.label}>enter room code</Text>
-        <TextInput
-          style={[s.input, { letterSpacing: 4 }]}
-          value={joinCode}
-          onChangeText={setJoinCode}
-          placeholder="SAGE-XXXX"
-          placeholderTextColor={Colors.textMuted}
-          autoCapitalize="characters"
-          autoFocus
-        />
-        <TouchableOpacity style={[s.submitBtn, { borderColor: sageColor }]} onPress={handleJoin} disabled={loading}>
-          <Text style={[s.submitText, { color: sageColor }]}>{loading ? 'joining...' : '[join]'}</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-
-  if (mode === 'room' && activeRoom) return (
-    <KeyboardAvoidingView 
-      style={s.root} 
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => setMode('menu')}><Text style={s.back}>{'< back'}</Text></TouchableOpacity>
-        <View style={s.roomHeaderCenter}>
-          <Text style
+      <View style
