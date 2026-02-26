@@ -1,22 +1,6 @@
 """
 main.py — Sage Backend Server
 FastAPI + WebSockets. Server is a blind relay — cannot decrypt messages.
-
-Endpoints:
-  POST /auth/send-otp          — Send OTP to email
-  POST /auth/verify-otp        — Verify OTP, return session token
-  POST /auth/register          — Complete registration (username + pubkey)
-  GET  /auth/me                — Get current user profile
-  POST /auth/change-username   — Change username (once only)
-  POST /auth/update-pubkey     — Store/update RSA public key
-  GET  /users/search?q=        — Search users by username
-  GET  /users/:hash_id         — Get user by hash_id (for QR scan)
-  GET  /contacts               — Get contact list
-  GET  /messages/:user_id      — Get message history with a user (today only)
-  GET  /rooms/:room_id/export  — Export room chat as .txt (admin only)
-  POST /rooms                  — Create a room
-  POST /rooms/join             — Join room by code
-  WS   /ws/:user_id            — WebSocket connection for real-time chat
 """
 
 import os, json, secrets, logging, hashlib
@@ -26,8 +10,8 @@ from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, EmailStr
+from fastapi.responses import PlainTextResponse, HTMLResponse
+from pydantic import BaseModel
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -42,9 +26,9 @@ log = logging.getLogger("sage")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 SECRET_KEY   = os.getenv("SECRET_KEY", "changeme")
+EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "")  # optional, for push auth
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ── Lifespan ─────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # scheduler = start_scheduler()
@@ -57,14 +41,13 @@ app.add_middleware(CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"])
 
-# ── Session tokens (simple signed tokens, no JWT library needed) ──
+# ── Session tokens ────────────────────────────────────────────
 def make_token(user_id: str) -> str:
     raw = f"{user_id}:{SECRET_KEY}"
     sig = hashlib.sha256(raw.encode()).hexdigest()[:16]
     return f"{user_id}.{sig}"
 
 def verify_token(token: str) -> str:
-    """Returns user_id or raises HTTPException."""
     try:
         user_id, sig = token.rsplit(".", 1)
         expected = hashlib.sha256(f"{user_id}:{SECRET_KEY}".encode()).hexdigest()[:16]
@@ -85,19 +68,43 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     return result.data[0]
 
 def get_user_timezone_from_ip(ip: str) -> str:
-    """Detect timezone from IP using free ip-api.com (1000 req/min free)."""
     try:
         r = req_lib.get(f"http://ip-api.com/json/{ip}?fields=timezone", timeout=3)
         tz = r.json().get("timezone", "UTC")
-        pytz.timezone(tz)  # validate
+        pytz.timezone(tz)
         return tz
     except Exception:
         return "UTC"
 
+# ── Push Notification Helper ──────────────────────────────────
+def send_push_notification(push_token: str, title: str, body: str, data: dict = {}):
+    """Send Expo push notification to a device."""
+    if not push_token or not push_token.startswith("ExponentPushToken"):
+        return
+    try:
+        headers = {"Content-Type": "application/json"}
+        if EXPO_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {EXPO_ACCESS_TOKEN}"
+        req_lib.post(
+            "https://exp.host/--/api/v2/push/send",
+            json={
+                "to": push_token,
+                "title": title,
+                "body": body,
+                "data": data,
+                "sound": "default",
+                "priority": "high",
+            },
+            headers=headers,
+            timeout=5,
+        )
+    except Exception as e:
+        log.warning(f"[push] Failed to send notification: {e}")
+
 # ── WebSocket Connection Manager ──────────────────────────────
 class ConnectionManager:
     def __init__(self):
-        self.active: dict[str, WebSocket] = {}  # user_id → websocket
+        self.active: dict[str, WebSocket] = {}
 
     async def connect(self, user_id: str, ws: WebSocket):
         await ws.accept()
@@ -161,10 +168,8 @@ async def verify_otp_route(body: VerifyOTPRequest, x_forwarded_for: Optional[str
 
     user = get_or_create_user(email)
     if not user:
-        # New user — needs registration
         return {"ok": True, "needs_registration": True, "email": email}
 
-    # Update timezone from IP
     ip = (x_forwarded_for or "").split(",")[0].strip() or "8.8.8.8"
     tz = get_user_timezone_from_ip(ip)
     db.table("users").update({"timezone": tz, "last_seen": datetime.now(timezone.utc).isoformat()})\
@@ -176,9 +181,6 @@ async def verify_otp_route(body: VerifyOTPRequest, x_forwarded_for: Optional[str
 @app.post("/auth/register")
 async def register(body: RegisterRequest, authorization: str = Header(None),
                    x_forwarded_for: Optional[str] = Header(None)):
-    # During registration we use a temporary email token
-    # The email is passed via a short-lived temp token stored in headers
-    # Simpler: pass email in body since OTP was just verified
     raise HTTPException(status_code=400, detail="Use /auth/register-new")
 
 class RegisterNewRequest(BaseModel):
@@ -188,7 +190,6 @@ class RegisterNewRequest(BaseModel):
 
 @app.post("/auth/register-new")
 async def register_new(body: RegisterNewRequest, x_forwarded_for: Optional[str] = Header(None)):
-    """Called after OTP verify for new users."""
     username = body.username.lower().strip()
     if not _valid_username(username):
         raise HTTPException(status_code=400,
@@ -202,7 +203,6 @@ async def register_new(body: RegisterNewRequest, x_forwarded_for: Optional[str] 
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Store public key
     db.table("public_keys").upsert({"user_id": user["id"], "pubkey_pem": body.pubkey_pem}).execute()
 
     token = make_token(user["id"])
@@ -233,17 +233,27 @@ async def update_pubkey(body: UpdatePubkeyRequest, user=Depends(get_current_user
 # USER ROUTES
 # ═══════════════════════════════════════════════════════════════
 
+class UpdateBioRequest(BaseModel):
+    bio: str
+
+@app.post("/auth/update-bio")
+async def update_bio(body: UpdateBioRequest, user=Depends(get_current_user)):
+    """FIX #5: Save user bio (max 160 chars, visible to everyone)."""
+    bio = body.bio.strip()[:160]
+    db.table("users").update({"bio": bio}).eq("id", user["id"]).execute()
+    return {"ok": True, "bio": bio}
+
 @app.get("/users/search")
 async def search_users(q: str, user=Depends(get_current_user)):
     if len(q) < 2:
         return {"users": []}
-    results = db.table("users").select("id,username,hash_id,display_name,last_seen")\
+    results = db.table("users").select("id,username,hash_id,display_name,bio,last_seen")\
                 .ilike("username", f"%{q}%").neq("id", user["id"]).limit(20).execute()
     return {"users": results.data or []}
 
 @app.get("/users/by-hash/{hash_id}")
 async def get_user_by_hash(hash_id: str, user=Depends(get_current_user)):
-    result = db.table("users").select("id,username,hash_id,display_name,last_seen")\
+    result = db.table("users").select("id,username,hash_id,display_name,bio,last_seen")\
                .eq("hash_id", hash_id).limit(1).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="User not found")
@@ -262,14 +272,13 @@ async def get_pubkey(user_id: str, user=Depends(get_current_user)):
 
 @app.get("/contacts")
 async def get_contacts(user=Depends(get_current_user)):
-    result = db.table("contacts").select("contact_id, users!contacts_contact_id_fkey(id,username,hash_id,display_name,last_seen)")\
+    result = db.table("contacts").select("contact_id, users!contacts_contact_id_fkey(id,username,hash_id,display_name,bio,last_seen)")\
                .eq("user_id", user["id"]).execute()
     contacts = [r["users"] for r in (result.data or []) if r.get("users")]
     return {"contacts": contacts}
 
 @app.get("/messages/{other_user_id}")
 async def get_messages(other_user_id: str, user=Depends(get_current_user)):
-    """Get today's message history between two users (non-deleted only)."""
     uid = user["id"]
     result = db.table("messages").select("*")\
                .or_(f"and(sender_id.eq.{uid},receiver_id.eq.{other_user_id}),and(sender_id.eq.{other_user_id},receiver_id.eq.{uid})")\
@@ -282,7 +291,7 @@ async def get_messages(other_user_id: str, user=Depends(get_current_user)):
 
 class CreateRoomRequest(BaseModel):
     name: str
-    duration_hours: int  # 1, 6, 12, 24
+    duration_hours: int
 
 class JoinRoomRequest(BaseModel):
     room_code: str
@@ -313,7 +322,6 @@ async def join_room(body: JoinRoomRequest, user=Depends(get_current_user)):
 
 @app.get("/rooms/{room_id}/messages")
 async def get_room_messages(room_id: str, user=Depends(get_current_user)):
-    # Verify membership
     m = db.table("room_members").select("id").eq("room_id", room_id).eq("user_id", user["id"]).execute()
     if not m.data:
         raise HTTPException(status_code=403, detail="Not a member")
@@ -323,7 +331,6 @@ async def get_room_messages(room_id: str, user=Depends(get_current_user)):
 
 @app.get("/rooms/{room_id}/export", response_class=PlainTextResponse)
 async def export_room(room_id: str, user=Depends(get_current_user)):
-    """Export room chat as .txt — admin only."""
     room = db.table("rooms").select("*").eq("id", room_id).single().execute().data
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -346,12 +353,104 @@ async def export_room(room_id: str, user=Depends(get_current_user)):
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════════
+# FIX #7: QR Download Page — shown when app isn't installed
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/download", response_class=HTMLResponse)
+async def download_page():
+    """Landing page shown when someone scans a Sage QR code without the app installed."""
+    return HTMLResponse(content="""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Download Sage</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      max-width: 400px;
+      width: 100%;
+      border: 1px solid #333;
+      padding: 40px 32px;
+      text-align: center;
+    }
+    h1 {
+      font-size: 36px;
+      letter-spacing: 8px;
+      color: #f0c040;
+      margin-bottom: 8px;
+    }
+    .tagline {
+      color: #666;
+      font-size: 12px;
+      letter-spacing: 2px;
+      margin-bottom: 40px;
+    }
+    p {
+      color: #aaa;
+      font-size: 14px;
+      line-height: 1.8;
+      margin-bottom: 32px;
+    }
+    .btn {
+      display: block;
+      border: 1px solid #f0c040;
+      color: #f0c040;
+      padding: 14px 24px;
+      text-decoration: none;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      letter-spacing: 2px;
+      margin-bottom: 12px;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #f0c04015; }
+    .btn.secondary {
+      border-color: #333;
+      color: #666;
+    }
+    .footer {
+      color: #333;
+      font-size: 11px;
+      margin-top: 40px;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>SAGE</h1>
+    <div class="tagline">messages vanish at midnight. no history. no trace.</div>
+    <p>someone shared a sage link with you.<br/>download the app to read it.</p>
+    <a href="https://play.google.com/store/apps/details?id=com.aromalajith.sage" class="btn">
+      [download for android]
+    </a>
+    <a href="#" class="btn secondary">
+      [ios — coming soon]
+    </a>
+    <div class="footer">end-to-end encrypted · open source · free</div>
+  </div>
+</body>
+</html>
+""")
+
+# ═══════════════════════════════════════════════════════════════
 # WEBSOCKET — Real-time relay
 # ═══════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
-    # Verify token passed as query param
     try:
         verified_id = verify_token(token)
         if verified_id != user_id:
@@ -376,48 +475,52 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
 
             # ── Direct Message ────────────────────────────────
             if mtype == "dm":
-                to_id        = msg.get("to")
-                encrypted    = msg.get("data", "")
-                burn_mode    = msg.get("burn_mode", False)
-                burn_ms      = msg.get("burn_duration_ms")
-                expires_at   = calculate_message_expiry(user.get("timezone", "UTC"))
+                to_id     = msg.get("to")
+                encrypted = msg.get("data", "")
+                expires_at = calculate_message_expiry(user.get("timezone", "UTC"))
 
-                # Persist to DB
                 row = {
-                    "sender_id":       user_id,
-                    "receiver_id":     to_id,
-                    "encrypted_data":  encrypted,
-                    "status":          "sent",
-                    "burn_mode":       burn_mode,
-                    "burn_duration_ms":burn_ms,
-                    "expires_at":      expires_at,
+                    "sender_id":      user_id,
+                    "receiver_id":    to_id,
+                    "encrypted_data": encrypted,
+                    "status":         "sent",
+                    "burn_mode":      False,
+                    "expires_at":     expires_at,
                 }
                 saved = db.table("messages").insert(row).execute().data[0]
 
-                # Add to contacts (both sides)
-                db.table("contacts").upsert({"user_id": user_id,    "contact_id": to_id}).execute()
+                db.table("contacts").upsert({"user_id": user_id, "contact_id": to_id}).execute()
                 db.table("contacts").upsert({"user_id": to_id, "contact_id": user_id}).execute()
 
-                # Relay to receiver — server CANNOT decrypt 'data'
-                log.info(f"[relay] DM {user_id}→{to_id} ({len(encrypted)} chars, CANNOT READ)")
+                log.info(f"[relay] DM {user_id}→{to_id} ({len(encrypted)} chars)")
                 await ws_manager.send(to_id, {
-                    "type":        "dm",
-                    "id":          saved["id"],
-                    "from":        user_id,
-                    "from_name":   user["username"],
-                    "data":        encrypted,         # still encrypted
-                    "burn_mode":   burn_mode,
-                    "burn_duration_ms": burn_ms,
-                    "created_at":  saved["created_at"],
+                    "type":       "dm",
+                    "id":         saved["id"],
+                    "from":       user_id,
+                    "from_name":  user["username"],
+                    "data":       encrypted,
+                    "created_at": saved["created_at"],
                 })
 
-                # Confirm delivery status to sender
-                await ws_manager.send(user_id, {"type": "status", "id": saved["id"], "status": "delivered"
-                    if to_id in ws_manager.active else "sent"})
+                is_online = to_id in ws_manager.active
+                await ws_manager.send(user_id, {
+                    "type":   "status",
+                    "id":     saved["id"],
+                    "status": "delivered" if is_online else "sent",
+                })
 
-                # Update status if receiver is online
-                if to_id in ws_manager.active:
+                if is_online:
                     db.table("messages").update({"status": "delivered"}).eq("id", saved["id"]).execute()
+                else:
+                    # FIX #6: Send push notification if recipient is offline
+                    recipient = db.table("users").select("push_token,username").eq("id", to_id).single().execute().data
+                    if recipient and recipient.get("push_token"):
+                        send_push_notification(
+                            push_token=recipient["push_token"],
+                            title=f"sage — {user['username']}",
+                            body="sent you a message",
+                            data={"from": user_id, "from_name": user["username"]},
+                        )
 
             # ── Read Receipt ──────────────────────────────────
             elif mtype == "read":
@@ -426,16 +529,11 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
                 row = db.table("messages").select("sender_id").eq("id", msg_id).single().execute().data
                 if row:
                     await ws_manager.send(row["sender_id"], {"type": "status", "id": msg_id, "status": "read"})
-                    # Set burn timer if applicable
-                    msg_row = db.table("messages").select("*").eq("id", msg_id).single().execute().data
-                    if msg_row and msg_row.get("burn_mode") and msg_row.get("burn_duration_ms"):
-                        burn_at = (datetime.now(timezone.utc) + timedelta(milliseconds=msg_row["burn_duration_ms"])).isoformat()
-                        db.table("messages").update({"burned_at": burn_at}).eq("id", msg_id).execute()
 
             # ── Reaction ──────────────────────────────────────
             elif mtype == "reaction":
                 msg_id   = msg.get("id")
-                reaction = msg.get("reaction")  # '+1' | '!' | '?'
+                reaction = msg.get("reaction")
                 if reaction not in ("+1", "!", "?", None):
                     continue
                 db.table("messages").update({"reaction": reaction}).eq("id", msg_id).execute()
@@ -457,7 +555,6 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
             elif mtype == "room_msg":
                 room_id   = msg.get("room_id")
                 encrypted = msg.get("data", "")
-                # Verify membership
                 m = db.table("room_members").select("id").eq("room_id", room_id).eq("user_id", user_id).execute()
                 if not m.data:
                     continue
@@ -486,7 +583,6 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
 # ═══════════════════════════════════════════════════════════════
 
 def _safe_user(u: dict) -> dict:
-    """Remove sensitive fields before sending to client."""
     return {k: v for k, v in u.items() if k not in ("email",)}
 
 def _valid_username(u: str) -> bool:
