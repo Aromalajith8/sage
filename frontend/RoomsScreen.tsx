@@ -1,9 +1,10 @@
 // src/screens/RoomsScreen.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, TextInput,
-  Modal, Alert, ScrollView,
+  Alert, ScrollView,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Colors, Font, Spacing, getSageColor } from '../utils/theme';
@@ -20,6 +21,8 @@ interface Room {
 
 interface Props { onBack: () => void; }
 
+const MY_ROOMS_KEY = 'sage_my_rooms';
+
 export default function RoomsScreen({ onBack }: Props) {
   const { user } = useStore();
   const [mode, setMode]         = useState<'menu' | 'create' | 'join' | 'room'>('menu');
@@ -28,13 +31,45 @@ export default function RoomsScreen({ onBack }: Props) {
   const [joinCode, setJoinCode] = useState('');
   const [loading, setLoading]   = useState(false);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
+  const [myRooms, setMyRooms]   = useState<Room[]>([]);
   const sageColor = getSageColor();
+
+  // FIX #3: Load saved rooms on mount, filter out expired ones
+  useEffect(() => {
+    loadMyRooms();
+  }, []);
+
+  const loadMyRooms = async () => {
+    try {
+      const raw = await AsyncStorage.getItem(MY_ROOMS_KEY);
+      if (!raw) return;
+      const rooms: Room[] = JSON.parse(raw);
+      // Filter out expired rooms
+      const active = rooms.filter(r => new Date(r.expires_at).getTime() > Date.now());
+      setMyRooms(active);
+      // Save back cleaned list
+      await AsyncStorage.setItem(MY_ROOMS_KEY, JSON.stringify(active));
+    } catch {}
+  };
+
+  const saveRoom = async (room: Room) => {
+    try {
+      const raw = await AsyncStorage.getItem(MY_ROOMS_KEY);
+      const rooms: Room[] = raw ? JSON.parse(raw) : [];
+      // Avoid duplicates
+      const filtered = rooms.filter(r => r.id !== room.id);
+      const updated = [room, ...filtered];
+      await AsyncStorage.setItem(MY_ROOMS_KEY, JSON.stringify(updated));
+      setMyRooms(updated.filter(r => new Date(r.expires_at).getTime() > Date.now()));
+    } catch {}
+  };
 
   const handleCreate = async () => {
     if (!roomName.trim()) return Alert.alert('Error', 'Enter a room name');
     setLoading(true);
     try {
       const res = await api.createRoom(roomName.trim(), duration);
+      await saveRoom(res.room);
       setActiveRoom(res.room);
       setMode('room');
     } catch (e: any) {
@@ -50,6 +85,7 @@ export default function RoomsScreen({ onBack }: Props) {
     setLoading(true);
     try {
       const res = await api.joinRoom(code);
+      await saveRoom(res.room);
       setActiveRoom(res.room);
       setMode('room');
     } catch (e: any) {
@@ -83,11 +119,12 @@ export default function RoomsScreen({ onBack }: Props) {
 
   // ── Main menu ────────────────────────────────────────────────
   if (mode === 'menu') return (
-    <View style={s.root}>
+    <ScrollView style={s.root} contentContainerStyle={{ flexGrow: 1 }}>
       <View style={s.header}>
         <TouchableOpacity onPress={onBack}><Text style={s.back}>{'< back'}</Text></TouchableOpacity>
         <Text style={[s.title, { color: sageColor }]}>ROOMS</Text>
       </View>
+
       <View style={s.menu}>
         <Text style={s.menuHint}>{'> self-destructing group chats'}</Text>
         <TouchableOpacity style={s.menuBtn} onPress={() => setMode('create')}>
@@ -97,7 +134,27 @@ export default function RoomsScreen({ onBack }: Props) {
           <Text style={s.menuBtnText}>[join with code]</Text>
         </TouchableOpacity>
       </View>
-    </View>
+
+      {/* FIX #3: My Rooms section */}
+      {myRooms.length > 0 && (
+        <View style={s.myRoomsSection}>
+          <Text style={s.myRoomsLabel}>MY ROOMS</Text>
+          {myRooms.map(room => (
+            <TouchableOpacity
+              key={room.id}
+              style={s.roomItem}
+              onPress={() => { setActiveRoom(room); setMode('room'); }}
+            >
+              <View style={s.roomItemLeft}>
+                <Text style={s.roomItemName}>{room.name}</Text>
+                <Text style={s.roomItemCode}>{room.room_code}</Text>
+              </View>
+              <Text style={s.roomItemExpiry}>{formatExpiry(room.expires_at)}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+    </ScrollView>
   );
 
   // ── Create room ──────────────────────────────────────────────
@@ -201,27 +258,37 @@ const s = StyleSheet.create({
   back:    { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm },
   title:   { fontFamily: Font.mono, fontSize: Font.size.lg, fontWeight: 'bold', letterSpacing: 4 },
 
-  menu:       { flex: 1, justifyContent: 'center', paddingHorizontal: Spacing.xl },
-  menuHint:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginBottom: Spacing.xl },
-  menuBtn:    { borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, marginBottom: Spacing.md },
-  menuBtnText:{ fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base },
+  menu:        { paddingHorizontal: Spacing.xl, paddingTop: Spacing.xl },
+  menuHint:    { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginBottom: Spacing.xl },
+  menuBtn:     { borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, marginBottom: Spacing.md },
+  menuBtnText: { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base },
 
-  form:    { padding: Spacing.lg },
-  label:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
-             letterSpacing: 2, marginBottom: Spacing.sm },
-  input:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base,
-             borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm,
-             backgroundColor: Colors.inputBg, marginBottom: Spacing.lg },
-  durationRow:{ flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.xl },
-  durationBtn:{ flex: 1, borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm, alignItems: 'center' },
+  myRoomsSection: { paddingHorizontal: Spacing.md, paddingTop: Spacing.xl },
+  myRoomsLabel:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
+                    letterSpacing: 2, marginBottom: Spacing.md },
+  roomItem:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                    borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, marginBottom: Spacing.sm },
+  roomItemLeft:   { flex: 1 },
+  roomItemName:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm },
+  roomItemCode:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginTop: 2 },
+  roomItemExpiry: { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs },
+
+  form:        { padding: Spacing.lg },
+  label:       { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
+                 letterSpacing: 2, marginBottom: Spacing.sm },
+  input:       { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base,
+                 borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm,
+                 backgroundColor: Colors.inputBg, marginBottom: Spacing.lg },
+  durationRow: { flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.xl },
+  durationBtn: { flex: 1, borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm, alignItems: 'center' },
   durationText:{ fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm },
-  submitBtn:  { borderWidth: 1, padding: Spacing.md, alignItems: 'center' },
-  submitText: { fontFamily: Font.mono, fontSize: Font.size.sm, fontWeight: 'bold', letterSpacing: 4 },
+  submitBtn:   { borderWidth: 1, padding: Spacing.md, alignItems: 'center' },
+  submitText:  { fontFamily: Font.mono, fontSize: Font.size.sm, fontWeight: 'bold', letterSpacing: 4 },
 
   roomHeaderCenter:{ flex: 1, paddingHorizontal: Spacing.sm },
-  roomCode:  { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
-  exportBtn: { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs },
-  roomInfo:  { padding: Spacing.lg },
-  roomInfoText:{ fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm,
-                 lineHeight: 24, marginBottom: Spacing.xs },
+  roomCode:        { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
+  exportBtn:       { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs },
+  roomInfo:        { padding: Spacing.lg },
+  roomInfoText:    { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm,
+                     lineHeight: 24, marginBottom: Spacing.xs },
 });
