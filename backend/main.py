@@ -26,14 +26,12 @@ log = logging.getLogger("sage")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 SECRET_KEY   = os.getenv("SECRET_KEY", "changeme")
-EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "")  # optional, for push auth
+EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "")
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # scheduler = start_scheduler()
     yield
-    # scheduler.shutdown()
 
 app = FastAPI(title="Sage", lifespan=lifespan)
 
@@ -78,7 +76,6 @@ def get_user_timezone_from_ip(ip: str) -> str:
 
 # ── Push Notification Helper ──────────────────────────────────
 def send_push_notification(push_token: str, title: str, body: str, data: dict = {}):
-    """Send Expo push notification to a device."""
     if not push_token or not push_token.startswith("ExponentPushToken"):
         return
     try:
@@ -238,7 +235,6 @@ class UpdateBioRequest(BaseModel):
 
 @app.post("/auth/update-bio")
 async def update_bio(body: UpdateBioRequest, user=Depends(get_current_user)):
-    """FIX #5: Save user bio (max 160 chars, visible to everyone)."""
     bio = body.bio.strip()[:160]
     db.table("users").update({"bio": bio}).eq("id", user["id"]).execute()
     return {"ok": True, "bio": bio}
@@ -353,12 +349,11 @@ async def export_room(room_id: str, user=Depends(get_current_user)):
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════════
-# FIX #7: QR Download Page — shown when app isn't installed
+# QR Download Page
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/download", response_class=HTMLResponse)
 async def download_page():
-    """Landing page shown when someone scans a Sage QR code without the app installed."""
     return HTMLResponse(content="""
 <!DOCTYPE html>
 <html lang="en">
@@ -369,63 +364,20 @@ async def download_page():
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      background: #000;
-      color: #fff;
+      background: #000; color: #fff;
       font-family: 'Courier New', monospace;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
+      min-height: 100vh; display: flex;
+      align-items: center; justify-content: center; padding: 24px;
     }
-    .card {
-      max-width: 400px;
-      width: 100%;
-      border: 1px solid #333;
-      padding: 40px 32px;
-      text-align: center;
-    }
-    h1 {
-      font-size: 36px;
-      letter-spacing: 8px;
-      color: #f0c040;
-      margin-bottom: 8px;
-    }
-    .tagline {
-      color: #666;
-      font-size: 12px;
-      letter-spacing: 2px;
-      margin-bottom: 40px;
-    }
-    p {
-      color: #aaa;
-      font-size: 14px;
-      line-height: 1.8;
-      margin-bottom: 32px;
-    }
-    .btn {
-      display: block;
-      border: 1px solid #f0c040;
-      color: #f0c040;
-      padding: 14px 24px;
-      text-decoration: none;
-      font-family: 'Courier New', monospace;
-      font-size: 14px;
-      letter-spacing: 2px;
-      margin-bottom: 12px;
-      transition: background 0.2s;
-    }
-    .btn:hover { background: #f0c04015; }
-    .btn.secondary {
-      border-color: #333;
-      color: #666;
-    }
-    .footer {
-      color: #333;
-      font-size: 11px;
-      margin-top: 40px;
-      letter-spacing: 1px;
-    }
+    .card { max-width: 400px; width: 100%; border: 1px solid #333; padding: 40px 32px; text-align: center; }
+    h1 { font-size: 36px; letter-spacing: 8px; color: #f0c040; margin-bottom: 8px; }
+    .tagline { color: #666; font-size: 12px; letter-spacing: 2px; margin-bottom: 40px; }
+    p { color: #aaa; font-size: 14px; line-height: 1.8; margin-bottom: 32px; }
+    .btn { display: block; border: 1px solid #f0c040; color: #f0c040; padding: 14px 24px;
+           text-decoration: none; font-family: 'Courier New', monospace; font-size: 14px;
+           letter-spacing: 2px; margin-bottom: 12px; }
+    .btn.secondary { border-color: #333; color: #666; }
+    .footer { color: #333; font-size: 11px; margin-top: 40px; letter-spacing: 1px; }
   </style>
 </head>
 <body>
@@ -433,12 +385,8 @@ async def download_page():
     <h1>SAGE</h1>
     <div class="tagline">messages vanish at midnight. no history. no trace.</div>
     <p>someone shared a sage link with you.<br/>download the app to read it.</p>
-    <a href="https://play.google.com/store/apps/details?id=com.aromalajith.sage" class="btn">
-      [download for android]
-    </a>
-    <a href="#" class="btn secondary">
-      [ios — coming soon]
-    </a>
+    <a href="https://play.google.com/store/apps/details?id=com.aromalajith.sage" class="btn">[download for android]</a>
+    <a href="#" class="btn secondary">[ios — coming soon]</a>
     <div class="footer">end-to-end encrypted · open source · free</div>
   </div>
 </body>
@@ -488,18 +436,6 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
                     "expires_at":     expires_at,
                 }
                 saved = db.table("messages").insert(row).execute().data[0]
-
-                                expires_at = calculate_message_expiry(user.get("timezone", "UTC"))
-
-                row = {
-                    "sender_id":      user_id,
-                    "receiver_id":    to_id,
-                    "encrypted_data": encrypted,
-                    "status":         "sent",
-                    "burn_mode":      False,
-                    "expires_at":     expires_at,
-                }
-                saved = db.table("messages").insert(row).execute().data[0]
                 try:
                     db.table("contacts").upsert({"user_id": user_id, "contact_id": to_id}, on_conflict="user_id,contact_id").execute()
                 except:
@@ -521,19 +457,6 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
                 is_online = to_id in ws_manager.active
                 await ws_manager.send(user_id, {
                     "type":   "status",
-                log.info(f"[relay] DM {user_id}→{to_id} ({len(encrypted)} chars)")
-                await ws_manager.send(to_id, {
-                    "type":       "dm",
-                    "id":         saved["id"],
-                    "from":       user_id,
-                    "from_name":  user["username"],
-                    "data":       encrypted,
-                    "created_at": saved["created_at"],
-                })
-
-                is_online = to_id in ws_manager.active
-                await ws_manager.send(user_id, {
-                    "type":   "status",
                     "id":     saved["id"],
                     "status": "delivered" if is_online else "sent",
                 })
@@ -541,7 +464,6 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str):
                 if is_online:
                     db.table("messages").update({"status": "delivered"}).eq("id", saved["id"]).execute()
                 else:
-                    # FIX #6: Send push notification if recipient is offline
                     recipient = db.table("users").select("push_token,username").eq("id", to_id).single().execute().data
                     if recipient and recipient.get("push_token"):
                         send_push_notification(
