@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Sage",
+    "slug": "sage",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "backgroundColor": "#000000",
+    "scheme": "sage-app",
+    "android": {
+      "package": "com.aromalajith.sage",
+      "softwareKeyboardLayoutMode": "resize",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#000000"
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1b13ec00-a374-47b8-8f87-68cc2c7a1922"
+      }
+    }
+  }
+}
