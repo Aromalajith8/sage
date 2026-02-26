@@ -39,13 +39,20 @@ sage/
 - ✅ E2E encryption (RSA-2048 + AES-256-GCM)
 - ✅ Midnight message reset (per user timezone)
 - ✅ Delivery receipts [SENT] → [DELIVERED] → [READ]
-- ✅ Burn mode (auto-delete after read, timer based on message length)
 - ✅ Reactions [+1] [!] [?] via long press
 - ✅ Typing indicator (opt-in)
 - ✅ QR code identity sharing
 - ✅ User search by username
-- ✅ Self-destructing rooms (1/6/12/24h) with admin export
-- ✅ Push notifications (even when app closed)
+- ✅ Self-destructing rooms (1/6/12/24h)
 - ✅ Black/white terminal UI, SAGE logo cycles color daily
 
-## See DEPLOY.md for setup instructions.
+
+------------------------------------------------
+application link in Google drive 
+------------------------------------------------
+------------------------------------------------
+
+LINK:https://drive.google.com/drive/folders/1fJpEdLC79ikQOrCv66Okedw67VQPLALS
+
+------------------------------------------------
+------------------------------------------------
