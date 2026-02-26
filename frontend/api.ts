@@ -40,6 +40,7 @@ export const api = {
   getMe:          () => apiFetch('/auth/me'),
   changeUsername: (new_username: string) => apiFetch('/auth/change-username', { method: 'POST', body: JSON.stringify({ new_username }) }),
   updatePubkey:   (pubkey_pem: string) => apiFetch('/auth/update-pubkey', { method: 'POST', body: JSON.stringify({ pubkey_pem }) }),
+  updateBio:      (bio: string) => apiFetch('/auth/update-bio', { method: 'POST', body: JSON.stringify({ bio }) }),
 
   searchUsers:    (q: string) => apiFetch(`/users/search?q=${encodeURIComponent(q)}`),
   getUserByHash:  (hash_id: string) => apiFetch(`/users/by-hash/${hash_id}`),
