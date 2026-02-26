@@ -32,15 +32,11 @@ export default function App() {
   useEffect(() => { initialize(); }, []);
 
   // FIX #2: Android hardware back button + swipe-back gesture
-  useEffect(() => {
+useEffect(() => {
     const onBack = () => {
       if (screen === 'chat' || screen === 'settings' || screen === 'rooms') {
         setScreen('contacts');
-        return true; // handled — don't exit app
-      }
-      if (screen === 'contacts') {
-        // Let Android close the app naturally
-        return false;
+        return true;
       }
       return false;
     };
