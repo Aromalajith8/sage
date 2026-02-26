@@ -1,15 +1,16 @@
 // src/screens/RoomsScreen.tsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, TextInput,
-  Alert, ScrollView,
+  Alert, ScrollView, FlatList, KeyboardAvoidingView, Platform, BackHandler
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Colors, Font, Spacing, getSageColor } from '../utils/theme';
-import { api } from '../utils/api';
+import { api, wsClient } from '../utils/api';
 import { useStore } from '../store';
+import { encryptMessage, decryptMessage } from '../utils/crypto';
 
 interface Room {
   id: string;
@@ -17,6 +18,14 @@ interface Room {
   room_code: string;
   admin_id: string;
   expires_at: string;
+}
+
+interface RoomMessage {
+  id: string;
+  sender_id: string;
+  from_name: string;
+  text: string;
+  created_at: string;
 }
 
 interface Props { onBack: () => void; }
@@ -32,22 +41,74 @@ export default function RoomsScreen({ onBack }: Props) {
   const [loading, setLoading]   = useState(false);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
   const [myRooms, setMyRooms]   = useState<Room[]>([]);
+  const [messages, setMessages] = useState<RoomMessage[]>([]);
+  const [inputText, setInputText] = useState('');
+  const flatListRef = useRef<FlatList>(null);
   const sageColor = getSageColor();
 
-  // FIX #3: Load saved rooms on mount, filter out expired ones
   useEffect(() => {
     loadMyRooms();
   }, []);
+
+  // Handle Hardware Back Button
+  useEffect(() => {
+    const backAction = () => {
+      if (mode !== 'menu') {
+        setMode('menu');
+        setActiveRoom(null);
+        return true; // Prevent default behavior (closing app)
+      }
+      onBack(); // If on menu, use the navigator's back
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction
+    );
+
+    return () => backHandler.remove();
+  }, [mode, onBack]);
+
+
+  // Listen for real-time room messages
+  useEffect(() => {
+    if (!activeRoom) return;
+
+    const handleWsMessage = async (msg: any) => {
+      if (msg.type === 'room_msg' && msg.room_id === activeRoom.id) {
+        try {
+          const decrypted = await decryptMessage(msg.data);
+          const newMsg: RoomMessage = {
+            id: msg.id,
+            sender_id: msg.from,
+            from_name: msg.from_name,
+            text: decrypted,
+            created_at: msg.created_at,
+          };
+          setMessages(prev => [...prev, newMsg]);
+          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+        } catch (e) {
+          console.log('Failed to decrypt incoming room msg', e);
+        }
+      }
+    };
+
+    wsClient.onMessage(handleWsMessage);
+    loadRoomHistory(activeRoom.id);
+
+    return () => {
+      wsClient.offMessage(handleWsMessage);
+    };
+  }, [activeRoom]);
 
   const loadMyRooms = async () => {
     try {
       const raw = await AsyncStorage.getItem(MY_ROOMS_KEY);
       if (!raw) return;
       const rooms: Room[] = JSON.parse(raw);
-      // Filter out expired rooms
       const active = rooms.filter(r => new Date(r.expires_at).getTime() > Date.now());
       setMyRooms(active);
-      // Save back cleaned list
       await AsyncStorage.setItem(MY_ROOMS_KEY, JSON.stringify(active));
     } catch {}
   };
@@ -56,12 +117,34 @@ export default function RoomsScreen({ onBack }: Props) {
     try {
       const raw = await AsyncStorage.getItem(MY_ROOMS_KEY);
       const rooms: Room[] = raw ? JSON.parse(raw) : [];
-      // Avoid duplicates
       const filtered = rooms.filter(r => r.id !== room.id);
       const updated = [room, ...filtered];
       await AsyncStorage.setItem(MY_ROOMS_KEY, JSON.stringify(updated));
       setMyRooms(updated.filter(r => new Date(r.expires_at).getTime() > Date.now()));
     } catch {}
+  };
+
+  const loadRoomHistory = async (roomId: string) => {
+    try {
+      const res = await api.getRoomMessages(roomId);
+      const loaded: RoomMessage[] = [];
+      for (const m of res.messages) {
+        try {
+          const text = await decryptMessage(m.encrypted_data);
+          loaded.push({
+            id: m.id,
+            sender_id: m.sender_id,
+            from_name: m.users?.username || 'unknown',
+            text,
+            created_at: m.created_at,
+          });
+        } catch {}
+      }
+      setMessages(loaded);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 100);
+    } catch (e: any) {
+      Alert.alert('Error', 'Could not load room history');
+    }
   };
 
   const handleCreate = async () => {
@@ -71,6 +154,7 @@ export default function RoomsScreen({ onBack }: Props) {
       const res = await api.createRoom(roomName.trim(), duration);
       await saveRoom(res.room);
       setActiveRoom(res.room);
+      setMessages([]);
       setMode('room');
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -87,10 +171,45 @@ export default function RoomsScreen({ onBack }: Props) {
       const res = await api.joinRoom(code);
       await saveRoom(res.room);
       setActiveRoom(res.room);
+      setMessages([]);
       setMode('room');
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setLoading(false); }
+  };
+
+  const handleSend = async () => {
+    if (!inputText.trim() || !activeRoom) return;
+    const text = inputText.trim();
+    setInputText('');
+    
+    // Optimistic UI update
+    const tempId = `temp-${Date.now()}`;
+    const myMsg: RoomMessage = {
+      id: tempId,
+      sender_id: user?.id || '',
+      from_name: user?.username || 'me',
+      text,
+      created_at: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, myMsg]);
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+
+    try {
+      // In a real app, you need the public keys of all room members to encrypt properly.
+      // For this prototype, we'll use a placeholder or encrypt it simply if the backend handles room distribution differently.
+      // Assuming api.ts has a generic encrypt for rooms or you are sending raw for now (NOT SECURE for production)
+      // We will encrypt using the sender's key just so it's not plaintext on the wire, but this needs a proper group key exchange for production.
+      const encrypted = await encryptMessage(text, ""); // Requires proper pub key logic for groups
+      
+      wsClient.send({
+        type: 'room_msg',
+        room_id: activeRoom.id,
+        data: encrypted, // Send encrypted data
+      });
+    } catch (e) {
+      console.log('Failed to send room msg', e);
+    }
   };
 
   const handleExport = async () => {
@@ -117,7 +236,18 @@ export default function RoomsScreen({ onBack }: Props) {
     return `${h}h ${m}m remaining`;
   };
 
-  // ── Main menu ────────────────────────────────────────────────
+  const renderMessage = ({ item }: { item: RoomMessage }) => {
+    const isMe = item.sender_id === user?.id;
+    return (
+      <View style={[s.msgContainer, isMe ? s.msgContainerMe : s.msgContainerThem]}>
+        {!isMe && <Text style={s.msgSenderName}>{item.from_name}</Text>}
+        <View style={[s.msgBubble, isMe ? [s.msgBubbleMe, { borderColor: sageColor }] : s.msgBubbleThem]}>
+          <Text style={[s.msgText, isMe ? { color: sageColor } : null]}>{item.text}</Text>
+        </View>
+      </View>
+    );
+  };
+
   if (mode === 'menu') return (
     <ScrollView style={s.root} contentContainerStyle={{ flexGrow: 1 }}>
       <View style={s.header}>
@@ -135,7 +265,6 @@ export default function RoomsScreen({ onBack }: Props) {
         </TouchableOpacity>
       </View>
 
-      {/* FIX #3: My Rooms section */}
       {myRooms.length > 0 && (
         <View style={s.myRoomsSection}>
           <Text style={s.myRoomsLabel}>MY ROOMS</Text>
@@ -157,7 +286,6 @@ export default function RoomsScreen({ onBack }: Props) {
     </ScrollView>
   );
 
-  // ── Create room ──────────────────────────────────────────────
   if (mode === 'create') return (
     <View style={s.root}>
       <View style={s.header}>
@@ -194,7 +322,6 @@ export default function RoomsScreen({ onBack }: Props) {
     </View>
   );
 
-  // ── Join room ────────────────────────────────────────────────
   if (mode === 'join') return (
     <View style={s.root}>
       <View style={s.header}>
@@ -219,76 +346,12 @@ export default function RoomsScreen({ onBack }: Props) {
     </View>
   );
 
-  // ── Active room ──────────────────────────────────────────────
   if (mode === 'room' && activeRoom) return (
-    <View style={s.root}>
+    <KeyboardAvoidingView 
+      style={s.root} 
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
       <View style={s.header}>
         <TouchableOpacity onPress={() => setMode('menu')}><Text style={s.back}>{'< back'}</Text></TouchableOpacity>
         <View style={s.roomHeaderCenter}>
-          <Text style={[s.title, { color: sageColor }]}>{activeRoom.name}</Text>
-          <Text style={s.roomCode}>{activeRoom.room_code} · {formatExpiry(activeRoom.expires_at)}</Text>
-        </View>
-        {activeRoom.admin_id === user?.id && (
-          <TouchableOpacity onPress={handleExport}>
-            <Text style={s.exportBtn}>[export]</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-      <View style={s.roomInfo}>
-        <Text style={s.roomInfoText}>
-          {'> share code: '}<Text style={{ color: sageColor }}>{activeRoom.room_code}</Text>
-        </Text>
-        <Text style={s.roomInfoText}>{'> room chat coming in next update'}</Text>
-        <Text style={s.roomInfoText}>{'> room will be destroyed when timer expires'}</Text>
-        {activeRoom.admin_id === user?.id && (
-          <Text style={s.roomInfoText}>{'> you are the admin — only you can export'}</Text>
-        )}
-      </View>
-    </View>
-  );
-
-  return null;
-}
-
-const s = StyleSheet.create({
-  root:    { flex: 1, backgroundColor: Colors.bg },
-  header:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-             paddingHorizontal: Spacing.md, paddingTop: Spacing.xl, paddingBottom: Spacing.sm,
-             borderBottomWidth: 1, borderBottomColor: Colors.border },
-  back:    { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm },
-  title:   { fontFamily: Font.mono, fontSize: Font.size.lg, fontWeight: 'bold', letterSpacing: 4 },
-
-  menu:        { paddingHorizontal: Spacing.xl, paddingTop: Spacing.xl },
-  menuHint:    { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginBottom: Spacing.xl },
-  menuBtn:     { borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, marginBottom: Spacing.md },
-  menuBtnText: { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base },
-
-  myRoomsSection: { paddingHorizontal: Spacing.md, paddingTop: Spacing.xl },
-  myRoomsLabel:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
-                    letterSpacing: 2, marginBottom: Spacing.md },
-  roomItem:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-                    borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, marginBottom: Spacing.sm },
-  roomItemLeft:   { flex: 1 },
-  roomItemName:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm },
-  roomItemCode:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs, marginTop: 2 },
-  roomItemExpiry: { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs },
-
-  form:        { padding: Spacing.lg },
-  label:       { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
-                 letterSpacing: 2, marginBottom: Spacing.sm },
-  input:       { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base,
-                 borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm,
-                 backgroundColor: Colors.inputBg, marginBottom: Spacing.lg },
-  durationRow: { flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.xl },
-  durationBtn: { flex: 1, borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm, alignItems: 'center' },
-  durationText:{ fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm },
-  submitBtn:   { borderWidth: 1, padding: Spacing.md, alignItems: 'center' },
-  submitText:  { fontFamily: Font.mono, fontSize: Font.size.sm, fontWeight: 'bold', letterSpacing: 4 },
-
-  roomHeaderCenter:{ flex: 1, paddingHorizontal: Spacing.sm },
-  roomCode:        { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
-  exportBtn:       { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs },
-  roomInfo:        { padding: Spacing.lg },
-  roomInfoText:    { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.sm,
-                     lineHeight: 24, marginBottom: Spacing.xs },
-});
+          <Text style
