@@ -1,4 +1,5 @@
 // src/store/index.ts
+import 'react-native-gesture-handler';
 import { create } from 'zustand';
 
 export interface User {
