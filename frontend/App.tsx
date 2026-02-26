@@ -1,9 +1,9 @@
 // App.tsx — Sage root navigator (React Navigation)
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, StatusBar } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, StyleSheet, StatusBar, BackHandler } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, NavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator, TransitionPresets } from '@react-navigation/stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { Colors } from './src/utils/theme';
@@ -38,8 +38,24 @@ export default function App() {
   const { setUser, setToken: storeSetToken } = useStore();
   const [initialScreen, setInitialScreen]   = useState<keyof RootStackParamList>('Login');
   const [initializing, setInit]             = useState(true);
+  
+  // Create a ref for the navigation container so the hardware back button can use it
+  const navigationRef = useRef<NavigationContainerRef<RootStackParamList>>(null);
 
-  useEffect(() => { initialize(); }, []);
+  useEffect(() => { 
+    initialize(); 
+    
+    // Add Hardware Back Button Listener
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (navigationRef.current && navigationRef.current.canGoBack()) {
+        navigationRef.current.goBack();
+        return true; // Tells Android "We handled the back press, don't close the app"
+      }
+      return false; // Let default behavior happen (close app) if we are on the main screen
+    });
+
+    return () => backHandler.remove();
+  }, []);
 
   const registerPush = async () => {
     try {
@@ -83,7 +99,7 @@ export default function App() {
   return (
     <GestureHandlerRootView style={s.root}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator
           initialRouteName={initialScreen}
           screenOptions={{
