@@ -1,5 +1,5 @@
 // src/screens/ChatScreen.tsx
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, KeyboardAvoidingView, Platform, Modal, Alert,
@@ -7,7 +7,7 @@ import {
 import { Colors, Font, Spacing, getSageColor } from '../utils/theme';
 import { useStore, Message, Contact } from '../store';
 import { wsClient, api } from '../utils/api';
-import { encryptMessage, decryptMessage, getPrivateKeyPem, calculateBurnDuration } from '../utils/crypto';
+import { encryptMessage, decryptMessage, getPrivateKeyPem } from '../utils/crypto';
 
 interface Props {
   contact: Contact;
@@ -19,8 +19,8 @@ const FIRST_MSG_KEY = 'sage_first_msg_shown';
 
 export default function ChatScreen({ contact, onBack }: Props) {
   const { user, messages, addMessage, updateMessageStatus, updateMessageReaction,
-          deleteMessage, setActiveConversation, peerKeys, setPeerKey,
-          burnModeEnabled, setBurnMode, typingEnabled, typingUsers } = useStore();
+          setActiveConversation, peerKeys, setPeerKey,
+          typingEnabled, typingUsers } = useStore();
   const [text, setText]             = useState('');
   const [loading, setLoading]       = useState(true);
   const [showBanner, setShowBanner] = useState(false);
@@ -28,7 +28,6 @@ export default function ChatScreen({ contact, onBack }: Props) {
   const [privKey, setPrivKey]       = useState<string | null>(null);
   const listRef = useRef<FlatList>(null);
   const sageColor = getSageColor();
-  const burnOn = burnModeEnabled[contact.id] || false;
   const conversationMsgs = messages[contact.id] || [];
   const isTyping = typingUsers[contact.id] || false;
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -40,11 +39,9 @@ export default function ChatScreen({ contact, onBack }: Props) {
   }, [contact.id]);
 
   const initialize = async () => {
-    // Load private key
     const pk = await getPrivateKeyPem();
     setPrivKey(pk);
 
-    // Fetch peer's public key if needed
     if (!peerKeys[contact.id]) {
       try {
         const res = await api.getPubkey(contact.id);
@@ -52,14 +49,12 @@ export default function ChatScreen({ contact, onBack }: Props) {
       } catch {}
     }
 
-    // Load today's messages
     try {
       const res = await api.getMessages(contact.id);
-      const decrypted = await decryptAll(res.messages || [], pk!);
+      const decrypted = await decryptAll(res.messages || [], pk!, user!.id);
       useStore.getState().setMessages(contact.id, decrypted);
     } catch {}
 
-    // Check if first message ever — show midnight banner
     const key = `${FIRST_MSG_KEY}_${contact.id}`;
     const shown = await import('@react-native-async-storage/async-storage')
                     .then(m => m.default.getItem(key));
@@ -72,23 +67,26 @@ export default function ChatScreen({ contact, onBack }: Props) {
     setLoading(false);
   };
 
-  const decryptAll = async (msgs: Message[], pk: string): Promise<Message[]> => {
+  // FIX #8: own messages encrypted with recipient pubkey — we can't re-decrypt them.
+  // Keep the decrypted_text we stored during optimistic send.
+  const decryptAll = async (msgs: Message[], pk: string, myId: string): Promise<Message[]> => {
     if (!pk) return msgs;
     return Promise.all(msgs.map(async m => {
+      if (m.sender_id === myId) {
+        return { ...m, decrypted_text: m.decrypted_text || '[your message]' };
+      }
       try {
-        const text = decryptMessage(m.encrypted_data, pk);
-        return { ...m, decrypted_text: text };
+        const t = decryptMessage(m.encrypted_data, pk);
+        return { ...m, decrypted_text: t };
       } catch {
         return { ...m, decrypted_text: '[could not decrypt]' };
       }
     }));
   };
 
-  // WebSocket message handler
   useEffect(() => {
     const unsub = wsClient.onMessage(async (msg) => {
       if (msg.type === 'dm' && msg.from === contact.id) {
-        // Mark as read
         wsClient.send({ type: 'read', id: msg.id });
 
         let decryptedText = '[encrypted]';
@@ -103,23 +101,16 @@ export default function ChatScreen({ contact, onBack }: Props) {
           encrypted_data: msg.data,
           decrypted_text: decryptedText,
           status:         'read',
-          burn_mode:      msg.burn_mode || false,
-          burn_duration_ms: msg.burn_duration_ms,
+          burn_mode:      false,
           created_at:     msg.created_at,
           expires_at:     '',
           deleted:        false,
         };
         addMessage(contact.id, newMsg);
-
-        // Start burn timer if applicable
-        if (msg.burn_mode && msg.burn_duration_ms) {
-          startBurnCountdown(msg.id, msg.burn_duration_ms, contact.id);
-        }
-
         scrollToBottom();
       }
 
-      if (msg.type === 'status' && msg.from !== contact.id) {
+      if (msg.type === 'status') {
         updateMessageStatus(contact.id, msg.id, msg.status);
       }
 
@@ -139,10 +130,6 @@ export default function ChatScreen({ contact, onBack }: Props) {
     return unsub;
   }, [contact.id, privKey]);
 
-  const startBurnCountdown = (msgId: string, durationMs: number, convId: string) => {
-    setTimeout(() => deleteMessage(convId, msgId), durationMs);
-  };
-
   const sendMessage = async () => {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -154,18 +141,11 @@ export default function ChatScreen({ contact, onBack }: Props) {
     }
 
     try {
-      const encrypted   = encryptMessage(trimmed, pubkey);
-      const burnDuration = burnOn ? calculateBurnDuration(trimmed) : undefined;
+      const encrypted = encryptMessage(trimmed, pubkey);
 
-      wsClient.send({
-        type:            'dm',
-        to:              contact.id,
-        data:            encrypted,
-        burn_mode:       burnOn,
-        burn_duration_ms: burnDuration,
-      });
+      wsClient.send({ type: 'dm', to: contact.id, data: encrypted });
 
-      // Optimistic add
+      // Optimistic add — store plain text so WE can see our own message
       const optimistic: Message = {
         id:              `tmp_${Date.now()}`,
         sender_id:       user!.id,
@@ -173,8 +153,7 @@ export default function ChatScreen({ contact, onBack }: Props) {
         encrypted_data:  encrypted,
         decrypted_text:  trimmed,
         status:          'sent',
-        burn_mode:       burnOn,
-        burn_duration_ms: burnDuration,
+        burn_mode:       false,
         created_at:      new Date().toISOString(),
         expires_at:      '',
         deleted:         false,
@@ -223,9 +202,6 @@ export default function ChatScreen({ contact, onBack }: Props) {
       >
         <View style={[s.msgRow, isMe ? s.msgRowMe : s.msgRowThem]}>
           <View style={[s.msgBubble, isMe ? s.bubbleMe : s.bubbleThem]}>
-            {item.burn_mode && (
-              <Text style={s.burnLabel}>{'[burn] '}</Text>
-            )}
             <Text style={s.msgText}>{item.decrypted_text || '[encrypted]'}</Text>
             {item.reaction && (
               <Text style={s.reactionBadge}>[{item.reaction}]</Text>
@@ -241,7 +217,12 @@ export default function ChatScreen({ contact, onBack }: Props) {
   };
 
   return (
-    <KeyboardAvoidingView style={s.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    // FIX #1: behavior='padding' on both platforms keeps input above keyboard
+    <KeyboardAvoidingView
+      style={s.root}
+      behavior="padding"
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 25}
+    >
       {/* Header */}
       <View style={s.header}>
         <TouchableOpacity onPress={onBack} style={s.backBtn}>
@@ -251,18 +232,9 @@ export default function ChatScreen({ contact, onBack }: Props) {
           <Text style={s.headerName}>{contact.username}</Text>
           <Text style={s.headerHash}>{contact.hash_id}</Text>
         </View>
-        {/* Burn mode toggle */}
-        <TouchableOpacity
-          onPress={() => setBurnMode(contact.id, !burnOn)}
-          style={[s.burnToggle, burnOn && s.burnToggleOn]}
-        >
-          <Text style={[s.burnToggleText, burnOn && { color: sageColor }]}>
-            {burnOn ? '[BURN:ON]' : '[BURN]'}
-          </Text>
-        </TouchableOpacity>
       </View>
 
-      {/* Midnight banner (first message) */}
+      {/* Midnight banner */}
       {showBanner && (
         <TouchableOpacity style={s.banner} onPress={() => setShowBanner(false)}>
           <Text style={s.bannerText}>
@@ -279,6 +251,7 @@ export default function ChatScreen({ contact, onBack }: Props) {
         renderItem={renderMessage}
         contentContainerStyle={s.messageList}
         onContentSizeChange={scrollToBottom}
+        keyboardShouldPersistTaps="handled"
         ListEmptyComponent={
           loading ? null : (
             <Text style={s.emptyChat}>{'> start of conversation'}</Text>
@@ -345,9 +318,6 @@ const s = StyleSheet.create({
   headerCenter: { flex: 1 },
   headerName:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.base },
   headerHash:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
-  burnToggle:   { padding: Spacing.xs },
-  burnToggleOn: {},
-  burnToggleText:{ fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
 
   banner:     { backgroundColor: Colors.surface, padding: Spacing.md,
                 borderBottomWidth: 1, borderBottomColor: Colors.border },
@@ -357,19 +327,17 @@ const s = StyleSheet.create({
   emptyChat:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
                  textAlign: 'center', marginTop: Spacing.xl },
 
-  msgRow:   { marginBottom: Spacing.sm },
-  msgRowMe: { alignItems: 'flex-end' },
+  msgRow:    { marginBottom: Spacing.sm },
+  msgRowMe:  { alignItems: 'flex-end' },
   msgRowThem:{ alignItems: 'flex-start' },
-  msgBubble:{ maxWidth: '82%', padding: Spacing.sm,
-              borderWidth: 1, },
-  bubbleMe: { backgroundColor: Colors.surface, borderColor: Colors.border },
+  msgBubble: { maxWidth: '82%', padding: Spacing.sm, borderWidth: 1 },
+  bubbleMe:  { backgroundColor: Colors.surface, borderColor: Colors.border },
   bubbleThem:{ backgroundColor: Colors.bg, borderColor: Colors.borderDim },
-  burnLabel:{ fontFamily: Font.mono, color: '#666', fontSize: Font.size.xs },
-  msgText:  { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm, lineHeight: 20 },
+  msgText:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.sm, lineHeight: 20 },
   reactionBadge:{ fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs, marginTop: 4 },
-  msgMeta:  { flexDirection: 'row', marginTop: 4 },
-  msgTime:  { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
-  msgStatus:{ fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
+  msgMeta:   { flexDirection: 'row', marginTop: 4 },
+  msgTime:   { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
+  msgStatus: { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs },
 
   typingIndicator:{ fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.xs,
                     paddingHorizontal: Spacing.md, paddingBottom: Spacing.xs },
@@ -384,12 +352,12 @@ const s = StyleSheet.create({
   sendBtn:  { paddingLeft: Spacing.sm, paddingBottom: Spacing.sm },
   sendText: { fontFamily: Font.mono, fontSize: Font.size.lg },
 
-  reactionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center' },
-  reactionBox:     { backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border,
-                     padding: Spacing.lg, minWidth: 220 },
-  reactionTitle:   { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs, marginBottom: Spacing.md },
-  reactionRow:     { flexDirection: 'row', gap: Spacing.md },
-  reactionBtn:     { padding: Spacing.sm },
-  reactionText:    { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.lg },
-  reactionRemove:  { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.lg },
+  reactionOverlay:{ flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center' },
+  reactionBox:    { backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border,
+                    padding: Spacing.lg, minWidth: 220 },
+  reactionTitle:  { fontFamily: Font.mono, color: Colors.textDim, fontSize: Font.size.xs, marginBottom: Spacing.md },
+  reactionRow:    { flexDirection: 'row', gap: Spacing.md },
+  reactionBtn:    { padding: Spacing.sm },
+  reactionText:   { fontFamily: Font.mono, color: Colors.text, fontSize: Font.size.lg },
+  reactionRemove: { fontFamily: Font.mono, color: Colors.textMuted, fontSize: Font.size.lg },
 });
