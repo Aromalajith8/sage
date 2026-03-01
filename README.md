@@ -1,4 +1,6 @@
-A free, open-source, end-to-end encrypted chat app with a terminal aesthetic.
+#Sage
+
+"A free, open-source, end-to-end encrypted chat app with a terminal aesthetic."
 
 > messages vanish at midnight. no history. no trace.
 
