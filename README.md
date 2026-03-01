@@ -1,8 +1,7 @@
-# SAGE
+A free, open-source, end-to-end encrypted chat app with a terminal aesthetic.
 
 > messages vanish at midnight. no history. no trace.
 
-A free, open-source, end-to-end encrypted chat app with a terminal aesthetic.
 
 ## Stack
 - **App:** React Native + Expo (Android APK + Web browser)
