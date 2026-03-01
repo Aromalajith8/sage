@@ -1,4 +1,4 @@
-#Sage
+# SAGE
 
 "A free, open-source, end-to-end encrypted chat app with a terminal aesthetic."
 
